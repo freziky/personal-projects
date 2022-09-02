@@ -1,0 +1,435 @@
+---
+title: "Movie Recommendation Report"
+author: "Faneva Tafita REZIKY STEFANA"
+date: "2022-08-28"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	echo = FALSE
+)
+options(timeout = 3600)
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+library(caret)
+library(data.table)
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+
+# **Introduction**
+
+We are living in an era of data and AI. From the most pressing issues in our daily life to the smallest, atomic habits, most of it are related, or at least getting more related to the use of data. Data is now a big help in improving products both directly (for instance tech industries rely mostly on the use of data to create more accurate contents), and indirectly, as data can be used to improve marketing strategies and make products more appealing. Here, we have a case related both to direct and indirect use of data on a product. Streaming industries like YouTube and Netflix are using algorithm in order to satisfy users by recommending movies that match to the users' preferences. Preferences can be shown in many ways: by looking at the most seen types of movies, the use of like/dislike and/or share button,... Let's get a look at our data:
+
+```{r data details, echo=FALSE, message=FALSE, warning=FALSE}
+str(movielens)
+```
+
+Here, we have a data frame with 10 millions observations and 6 variables: *userId* a chain of number that helps identify the user; *movieId*: an identifier to help identify the movie; *rating* (the outcome variable), which is the rating the user attributed to the movie based on how satisfied they were and ranging from 0 to 5; *timestamp*: an integer expressing the date of rating, using second as unit; *title*, a character vector of the movie title; genres: the genres in which the each movie belongs to.
+
+For the purpose of our data analysis, we decided to split the data into 2 data sets: *edx* data, the data on which we will perform our analysis and train our algorithm, and *validation* data on which we'll test our data. They both correspond respectively to 90% and 10% of the initial data frame *movielens*. Here are the dimensions of the train and test set.
+
+```{r dimension of train and test data, message=FALSE, warning=FALSE}
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+dim(edx)
+dim(validation)
+```
+
+# Analysis
+
+```{r loading libraries, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("matrixStats", repos = "http://cran.us.r-projects.org")
+library(lubridate)
+library(matrixStats)
+```
+
+Before we start our analysis, we need to take a look at both our train and test sets.
+
+Here is our train set:
+
+```{r train data, message=FALSE, warning=FALSE}
+head(edx)
+```
+
+And here's our test set:
+
+```{r first rows of the validation set}
+head(validation)
+```
+
+We can see that there are further variables that we can extract from the data
+
+## Variable extraction
+
+There are 2 variables that can be extracted from the initial train and test sets: the date of rating and the release date of the movie.
+
+### Rating date
+
+The date of rating is shown within the *timestamp* variable. The *timestamp* variable is an expression of the rating date in second. There are 2 points which makes it difficult to exploit this variable: the first one is its precision, as such atomic-leveled precision creates too division in the data and therefore makes each observation different: this can be a source of bias. Another point is that this precise tool do not affect the user's preference. Therefore, we need a larger time period. We will therefore choose the year as a time reference. We will name it *rate_year*.
+
+```{r}
+edx <- edx %>% mutate(rate_year=year(as_datetime(timestamp)))
+validation <- validation %>% mutate(rate_year=year(as_datetime(timestamp)))
+```
+
+### Release date
+
+When we looked at the first lines of *edx* and *validation* data sets, we saw certain pattern within the *title* variable:
+
+```{r viewing title variable}
+head(edx$title)
+```
+
+We can see that the *title* variable is a character string and at its ending part, between brackets, there are 4 digits which indicate the release date of the movie as part of the movie title. We will extract this variable and name it *release* variable.
+
+```{r extracting release date}
+edx <- edx %>% mutate(release=parse_number(str_extract(title, pattern="\\(\\d{4}\\)$")))
+validation <- validation %>% mutate(release=parse_number(str_extract(title, pattern = "\\(\\d{4}\\)$")))
+```
+
+## Analysis: statistics and visualization
+
+We will perform our analysis using statistics and visualization approaches.
+
+### Basic statistics
+
+The first thing we'll look at the outcome variable statistics. To do so, we'll look at the basic statistical summary. We will summarize the data and save under *avg* column the average rating in the full training data set and under *se* column the standard deviation. Here is the statistical summary of the rating distribution:
+
+```{r statistical summary, message=FALSE, warning=FALSE, paged.print=FALSE}
+edx %>% summarize(avg=mean(rating), se=sd(rating))
+```
+
+We can see that the average rating by every user is 3.51 and the average distance to the mean is 1.06.
+
+Starting from this point, we'll see the distribution of the rating given each variable. This follows a Bayesian notation and that's what we'll look in the following paragraphs.
+
+### User variable
+
+The user is the main source of variation that we'll need to take, as the analysis is mainly made for the user and their preferences is based on their distribution. Here, we will plot the distribution of rating given the user. To do this, we will find the conditional average, **E(Rating\|User)**, which is the average rating by each user. Here is the distribution the rating given by every user plotted.
+
+```{r rating by user plot}
+edx %>% group_by(userId) %>% summarize(avg=mean(rating))%>% ggplot(aes(x=avg))+
+  geom_histogram(binwidth = .1)+
+  labs(title="Rating by user")
+```
+
+The plot takes the shape of a normal distribution, and we can clearly see that the rating per user are mostly concentrated a bit more than the average rating we found earlier, however, the difference is still quite close (less than .2 standard deviation away from the average).
+
+### Movie variable
+
+Apart from the user rating, each movie can also bring variation. The fact is that users can have difference general preference for each movies. We plot here the distribution of the average rating per movie.
+
+```{r rating by movie plot}
+edx %>% group_by(movieId) %>% summarize(avg=mean(rating)) %>% ggplot(aes(x=avg))+
+  geom_histogram(binwidth = .1)+
+  labs(title="Rating by movie")
+```
+
+### Genre variable
+
+In addition to the movie rating, genres can also reflect the user's preference. Even better, genres may bring more effect to the preference, as it quite determines the taste of each user, as the emotion the user expects from the movie depends on the genre.
+
+```{r initial genre}
+head(edx$genres)
+n_distinct(edx$genres)
+```
+
+We can see each movie may have different genres (eg: "Comedy\|Romance", "Action\|Crime\|Thriller"...). In this scheme, there are 797 different genres. Here is the distribution among the 797 genres in the initial data set:
+
+```{r raw genre distribution}
+edx %>% group_by(genres) %>% summarize(avg=mean(rating)) %>% 
+  ggplot(aes(avg))+
+  geom_histogram()+
+  labs(title="Raw genres distribution")
+```
+
+We can see here that there are clear variation related to the genres. The values rotate around the average, but the dispersion is still quite low. One thing with this variable is that it can be quite biased, as there are many genres that do not have that many rating.
+
+```{r proportion of genre with low rating number}
+edx %>% group_by(genres) %>% summarize(count=n()) %>% summarize(`Proportion of genre with less than 100 ratings`=mean(count<=100))
+```
+
+We can see that 20% of genres have less than 100 ratings, but we can avoid that by breaking *genres* into the actual unique genres. Now, let's find out how many genres are there actually.
+
+```{r splitting genre}
+p <- edx %>% separate_rows(genres, sep= "\\|") 
+n_distinct(p$genres)
+```
+
+There are actually 20 genres, and the combinations genres compose the 797 different genres in the initial data set. Here is the variation among the 20 homogeneous genres.
+
+```{r plotting genre distribution}
+p %>% ggplot(aes(x=genres, y=rating))+
+  geom_boxplot()+theme(axis.text.x = element_text(angle = 90))+
+  labs(title = "Rating per genre distribution")
+```
+
+We can see that there are distinct pattern of distribution: some has bigger interquartile range (the distance between the higher and lower horizontal bar), some medians are higher on the plot (the horizontal bold bar),... But still, there are not many dispersion.
+
+### Movie and genre variables
+
+Movie and genre variables are 2 variables that are closely related, as each movie belongs to a specific genre and a genre can have many movies. This means that it will be possible that we will not need both variables for our machine learning process, as they both may bring the same variability. We will need to choose. As we saw from the graphs above, there is not enough variability among genre, and therefore, it may be better to opt for movie variable.
+
+### Rating year
+
+The year of rating can be an important variable. Preferences may vary across years and so does the rating attributed. We will visualize the average rating per year. Do appreciate this variable, we will use 3 methods:
+
+-   A ***scatter plot***, which is the plot of the average rating per year at their actual level. This permits us to see any patterns on the data.
+
+-   A ***linearly smoothed plot***, which plots the linear regression of the average rating per year. This permits us to appreciate the tendency and to appreciate the effects.
+
+-   A ***smoothed plot***, which plots a smoothed tendency of the data. This confirms the patterns shown by the scatter plot.
+
+The combination of the linear regression and the scatter plot shows us the difference in balance on the data: some points may be farther than the actual while many points may be concentrated on an unique point. The linear and smooth plot on the other hand permits us to appreciate if there are any fluctuation compared to the general trends.
+
+Here is the plot for the rating year.
+
+```{r plotting the evolution of rating by year}
+edx %>% group_by(rate_year) %>% summarize(avg=mean(rating), count=n()) %>%
+  ggplot(aes(rate_year, avg))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  geom_smooth(col="red", lty="dashed")+
+  labs(title = "Rating year visualization", x= "Rating year", y="Average rating")
+```
+
+Here, we can see that the smooth shows 3 infliction points. This information is very useful for the machine learning part.
+
+### Release year
+
+The release year can be an important factor in the variation of preferences.
+
+1.  Some years may have created more blockbuster,
+2.  The preferences may be related to some attachment, for example, in some cases, it can relate to some people's childhood
+
+We will use the same approach as we did using the rating year.
+
+```{r plotting the rating per release year}
+edx %>% group_by(release) %>% summarize(avg=mean(rating), count=n()) %>% filter(count>=100)  %>%
+  ggplot(aes(release, avg))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  geom_smooth(col="red", lty="dashed")+
+  labs(title = "Release year visualization", x="Release year", y="Average rating")
+```
+
+We can identify 2 inflection points.
+
+After this exploratory analysis, we will move next to the machine learning part using the teachings from this analysis part.
+
+# Machine learning
+
+We will divide this part into 3 section: identification of the baseline scenario, regression method using discrete variable and regression method using continuous variable. These parts have been made to create a model that we'll improve, create prediction using discrete variables, and regress using numeric variables.
+
+## Baseline scenario
+
+In this part, we will create a model which will be the one we'll need to improve. This model is very simple: we will create an algorithm which guess the average rating every single time. Using this algorithm, we will get the following result.
+
+```{r result of the baseline scenario}
+avg <- mean(edx$rating)
+RMSE(avg, validation$rating)
+```
+
+As we train our model, we will try to improve this result.
+
+Note: We will try to improve this model, not the following models, as improvement may sometimes cause bias, called over-training.
+
+## Regression using discrete variable
+
+For this part of regression method, as we have a very large data frame and many unique points, we will use regularization. We will use the following formula:
+
+$Rating_i = Average + User Effects_i + Movie Effects_i + Genre Effect_i$
+
+Each of these effects are called bias, and corresponds to the average of rating given each variables. We will find the bias for each variable.
+
+### User bias
+
+As we saw earlier, the user bias is the average effect of the user on the rating. To find the user bias, we will need to subtract the average, also called ***general bias***, from the actual rating.
+
+Here is the result of the new model.
+
+```{r user bias}
+user_bias <- edx %>% group_by(userId) %>% summarize(ubias=mean(rating-avg))
+validation <- user_bias %>% right_join(validation, by="userId")
+edx <- left_join(edx, user_bias, by="userId")
+RMSE(avg+validation$ubias, validation$rating)
+```
+
+### Movie bias
+
+We will find the movie bias using the same approach as the user bias, but this time, we will remove from the actual rating the general bias and the user bias. This was performed for us to avoid any sort of confounding, as we may still account for the user bias someway alongside user bias. Here, we have the result accounting for the movie bias.
+
+```{r movie bias}
+movie_bias <- edx %>% group_by(movieId) %>% summarize(mbias=mean(rating-avg-ubias))
+validation <- validation %>% left_join(., movie_bias)
+edx <- left_join(edx, movie_bias, by="movieId")
+RMSE(avg+validation$ubias+validation$mbias, validation$rating)
+```
+
+### Genre variable
+
+We mentioned earlier that we will need to choose between *movie* and *genres* variables, but here, we can prove this fact by looking at the remaining effect that genres variable is able to predict. We will show here the variation that genres can bring, by showing the range (minimum and maximum values) of the average genre effect.
+
+```{r range of the average genre effect}
+edx %>% group_by(genres) %>% summarize(avg=mean(rating-avg-ubias-mbias)) %>% .$avg %>% range()
+```
+
+We can see that the values are very small (close to 0) and that it will only create a small approach to the actual prediction.
+
+## Regression using continuous variables
+
+In this part of regression is the technique needed to predict an outcome using continuous variables. We still have 2 variables for the regression: rating year and release year. Before we start, we need to plot the remaining effect on both variables, as some changes may have appeared after removing values from the previous regression.
+
+Here, we plot the remaining effect explained by the rating year:
+
+```{r rating year effect}
+edx %>% group_by(rate_year) %>% summarize(Effect = mean(rating-avg-ubias-mbias)) %>%
+  ggplot(aes(rate_year, Effect))+
+  geom_point()+
+  geom_smooth(method="lm", alpha=.1)+
+  geom_smooth(col="red", lty="dashed")+
+  labs(title = "Rating year effect", x="Rating year")
+```
+
+And here is the effect of the release on rating:
+
+```{r}
+edx %>% group_by(release) %>% summarize(Effect = mean(rating-avg-ubias-mbias)) %>%
+  ggplot(aes(release, Effect))+
+  geom_point()+
+  geom_smooth(method="lm", alpha=.1)+
+  geom_smooth(col="red", lty="dashed")+
+  labs(title = "Release year effect", x="Release year")
+```
+
+Here, we can see that there remains only one single variable for the regression, as the fluctuation is very low and quite flat. We will need to perform our regression using the rating year.
+
+For this part, we are going to consider a few method and pick the ones with the best result. Here, we will directly combine the results from the previous and the current regression method and see the results.
+
+### Linear regression
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+edx <- edx %>% mutate(yeffect=rating-avg-ubias-mbias)
+validation <- validation %>% mutate(yeffect=rating-avg-ubias-mbias)
+```
+
+A linear regression will be used as our baseline. We will choose algorithm that are able to perform better than the linear regression.
+
+```{r linear regression}
+fit_lm <- lm(yeffect ~ rate_year , data=edx)
+pred_lm <- predict(fit_lm, validation)+validation$mbias+validation$ubias+avg
+rm(fit_lm)
+RMSE(pred_lm, validation$rating)
+```
+
+The rating is quite close to the ones using the discrete variable alone. We will pick the methods that can improve this model.
+
+### Polynomial regression using lm
+
+As we saw earlier, the rating year had 3 inflection points. This can mean for us that the derivative equals to 0 thrice, therefore, if we want to fit using a polynomial approach, we will need to fit using a fourth degree polynomial.
+
+```{r regression using polynomial lm}
+fit_polylm <- lm(yeffect~poly(rate_year, 4), data=edx)
+pred_polylm <- predict(fit_polylm, validation)+avg+validation$ubias+validation$mbias
+rm(fit_polylm)
+RMSE(pred_polylm, validation$rating)
+```
+
+We have a better result. Let's find other ways to improve our model
+
+### Loess
+
+```{r loading library loess, include=FALSE}
+if(!require(gam)) install.packages("gam")
+library(gam)
+```
+
+Here, we will try another approach to fit our data, as there may be different way to predict our data. The first model we can try is loess regression: a technique where we use moving average.
+
+```{r loess regression}
+x <- edx %>% select(rate_year)
+y <- edx$yeffect
+fit_loess <- train(x, y, method="gamLoess")
+pred_loess <- predict(fit_loess, validation)+avg+validation$ubias+validation$mbias
+rm(fit_loess)
+RMSE(pred_loess, validation$rating)
+```
+
+We can see using loess that the results are close to the ones with our polynomial approach. This can also mean that our fitting approach using the polynomial was a good one, as it is close to the smoothing method.
+
+### Neural network
+
+```{r loading library neural network, include=FALSE}
+if(!require(brnn)) install.packages("brnn")
+library(brnn)
+```
+
+The next method that we'll consider is neural network. This is a very famous algorithm as it aims at recognizing the underlying relationships. Let see how it performs. We will use bayesian regularized neural network from the *brnn* package.
+
+```{r neural network regression, include=FALSE}
+fit_nnet <- train(x, y, method="brnn")
+```
+
+```{r prediction using nnet}
+pred_nnet <- predict(fit_nnet, validation)+avg+validation$ubias+validation$mbias
+rm(fit_nnet)
+RMSE(pred_nnet, validation$rating)
+
+```
+
+Neural network improved the prediction closer to the actual outcomes.\
+
+### Final model
+
+For us to create a stronger algorithm, we will find the average result found using the previous techniques. This way, we can avoid any sort of bias due to training.
+
+```{r final model}
+pred <- (pred_lm+pred_polylm+pred_loess+pred_nnet)/4
+result <- RMSE(pred, validation$rating)
+result
+```
+
+# Conclusion
+
+To sum up, machine learning and data analysis goes hand in hand: data analysis is an important method required before we make any sort of prediction using machine learning. Before we make any prediction, we need to visualize the data and analyze the statistical distribution among variables, find the best way to approach each variables and also choose among variables.
+
+Most of the time, when we hear the expression machine learning, we tend to think about something complicated, like complex code and techniques, however, as we saw using the discrete variables, it can be a simple approach that can explain most of the variation: the approach using regularization in the first part of the regression made most of the result:
+
+```{r rmse regularization}
+RMSE(avg+validation$ubias+validation$mbias, validation$rating)
+```
+
+We used the continuous variable as a way to fine tune our prediction and reach our final result:
+
+```{r final result}
+result
+```
+
+Another teaching that we found is that we do not necessarily need all of the variables, as we used only the user, movie and rating year and we set aside genre and release year. From our side, we need to pick carefully the variables as was the case with movie and genres variable, as both may explain the same thing but the dispersion among variables makes the one better than the other.
+
+A limitation we may find to this analysis is that rating may not be a better prediction to the user preferences when it comes to movie recommendation, however, browsing history and like/share button may be useful way, as rating may depend on some other factors apart from preferences.
